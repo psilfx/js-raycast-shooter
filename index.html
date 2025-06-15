@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="ru" >
+	<head>
+		<title>Рейкастер с DDA на javascript</title>
+		<meta charset="UTF-8" />
+		<script src="js/vector.js"></script>
+		<script src="js/color.js"></script>
+		<script src="js/draw.js"></script>
+		<script src="js/path-finder.js"></script>
+		<script src="js/map.js"></script>
+		<script src="js/raycast.js"></script>
+		<script src="js/dimage.js"></script>
+		<script src="js/angles.js"></script>
+		<script src="js/water.js"></script>
+		<script src="js/render.js"></script>
+		<script src="js/texture.js"></script>
+		<script src="js/camera.js"></script>
+		<script src="js/editor.js"></script>
+		<script src="js/controls.js"></script>
+		<script src="js/sprite.js"></script>
+		<script src="js/unit.js"></script>
+		<script src="js/collision.js"></script>
+		<script src="js/game-director.js"></script>
+		<script src="js/units/fatter.js"></script>
+		<script src="js/units/zombie.js"></script>
+		<script src="js/effects/blood.js"></script>
+		<script src="js/effects/bullet-dust.js"></script>
+		<script src="js/effects/blast.js"></script>
+		<script src="js/gamepad.js"></script>
+		<script src="js/effects.js"></script>
+		<script src="js/projectile.js"></script>
+		<script src="js/levels/levels.js"></script>
+		<script src="js/levels/level-1.js"></script>
+		<script src="js/weapon.js"></script>
+		<script src="js/weapons/shotgun.js"></script>
+		<script src="js/weapons/pistol.js"></script>
+		<script src="js/weapons/rifle.js"></script>
+		<script src="js/weapons/rocket.js"></script>
+		<script src="js/player.js"></script>
+		<script src="js/object.js"></script>
+		<script src="js/menu.js"></script>
+		<script src="js/hud.js"></script>
+		<script src="js/sound.js"></script>
+		<script src="js/objects/keyCard-red.js"></script>
+		<script src="js/objects/keyCard-blue.js"></script>
+		<script src="js/objects/keyCard-yellow.js"></script>
+		<script src="js/objects/aid.js"></script>
+		<script src="js/objects/ammo-pistol.js"></script>
+		<script src="js/objects/ammo-shotgun.js"></script>
+		<script src="js/objects/ammo-rifle.js"></script>
+		<script src="js/objects/ammo-rocket.js"></script>
+		
+	</head>
+	<body>
+		<div id="editor"></div>
+		<canvas id="texture-render" ></canvas>
+		<canvas id="raycast-canvas" width="400" height="225" ></canvas>
+		<style>
+			#raycast-canvas {
+				margin: 0 auto;
+				width: 100%;
+				user-select: none;
+			}
+			#texture-render {
+				display: none;
+			}
+			.editor-map-cell.selected {
+				background-color: green !important;
+			}
+			.editor-texture-image {
+				border: 5px solid white;
+				cursor: pointer;
+			}
+			.editor-texture-image.selected {
+				border: 5px solid green;
+			}
+		</style>
+		<script>
+			const canvas   = document.querySelector( "#raycast-canvas" );
+			const tcanvas  = document.querySelector( "#texture-render" ); //Канвас для рендера текстуры
+			const context  = canvas.getContext( "2d" , { willReadFrequently: true , alpha: false } );
+			const tcontext = tcanvas.getContext( "2d" , { willReadFrequently: true , alpha: false } );
+			context.font   = "20px roboto";
+			const width    = canvas.width;
+			const height   = canvas.height;
+			const widthH   = parseInt( canvas.width >> 1 );
+			const heightH  = parseInt( canvas.height >> 1 );
+			const fov      = Math.PI / 3; //Угол обзора
+			const fovHalf  = fov * 0.5;
+			const fovStep  = fov / canvas.width; //Шаг угла при проходе по экрану
+			const viewDist = 15; //Дистанция отрисовки
+			const viewDistCache = [];
+			for( let v = 0; v <= viewDist; v++ ) {
+				viewDistCache[ v ] = v / viewDist;
+			}
+			const heightStep  = viewDist / heightH;
+			const heightS     = heightH / viewDist;
+			const floorAspect = 0.65 ; //1.1 для 720
+			const camDepth = widthH / Math.tan( fovHalf ) ; //Глубина проекции
+			
+			LoadTextures();
+			LoadDecals();
+			LoadWeaponTextures();
+			LoadObjectTextures();
+			LoadMenuTextures();
+			
+			const maxHeight = height * 8;
+			const textSize  = 128;
+			const textSizeH = parseInt( textSize * 0.5 );
+			const shadowLength = 100;
+			//Уровень
+			let levelData = LoadLevel1();
+			const gameDirector = new GameDirector();
+			let   level     = new Map( 30 , 15 , [] );
+				  
+			
+			const cellWidth = height / level.size.x;
+			//Позиция камеры
+			const camera         = new Camera();
+			//
+			const draw           = new Draw();
+			const caster         = new Raycaster();
+			const angles         = new Angles();
+			const render         = new Render();
+			const collision      = new Collision();
+			const stripes        = render.CreateScreenStripes( width );
+			const water          = new Water( 0.00 , textures[ 5 ] );
+				  water.SetDirection( new Vector3F( 1 , 0 , 0 ) );
+				 // water.SetNoize( 10 );
+			let floorImage  = new Image();
+			const fps       = new FPS();
+			const hud       = new HUD();
+			
+			let threadReady = false;
+			const player    = new Player( camera , weaponsNamesEnums.pistol );
+			player.pause    = true;
+			//Для подгрузки текстур
+			let unit  = CreateFatterUnit( new Vector3F( 3 , 0 , 3 ) );
+			let unit1 = CreateZombieUnit( new Vector3F( 3 , 0 , 6 ) );
+
+			function StartLevel( playerReset = true ) {
+				player.pause = false;
+				if( playerReset ) {
+					level = new Map( 30 , 15 , [] );
+					camera.SetPosition( new Vector3F( levelData.playerStart.x , 0 , levelData.playerStart.y ) );
+					player.Reset();
+				}
+				level.LoadFromData( levelData );
+				level.CreatePathFinder();
+				sound.PlayMusicSound( 24 );
+			}
+
+			const cameraMove  = new CameraMoveAnimation();
+
+			const controls = new Controls();
+			const gamepadControl = new GamePad();
+			const gMenus         = {};
+				  gMenus.start   = new GMenu();
+				  gMenus.start.SetBGLayer( menuTextures[ 0 ] );
+				  gMenus.start.SetBGColor( "Blue" );
+				  gMenus.death     = new GMenu();
+				  gMenus.death.SetBGLayer( menuTextures[ 1 ] );
+				  gMenus.death.SetBGColor( "red" );
+				  gMenus.death.message = "Поражение";
+				  gMenus.win     = new GMenu();
+				  gMenus.win.message = "Победа!";
+				  gMenus.win.SetBGLayer( menuTextures[ 2 ] );
+				  gMenus.win.SetBGColor( "Blue" );
+			let gMenu = gMenus.start;
+
+			let   sound;
+			window.addEventListener( "keydown" , function( e ) {
+				controls.Input( e.keyCode , true );
+			});
+			window.addEventListener( "keyup" , function( e ) {
+				controls.Input( e.keyCode , false );
+			});
+			window.addEventListener( "mousemove" , function( e ) {
+				controls.Mouse( e.movementX , e.movementY );
+			});
+			document.addEventListener( 'mousedown' , function(event) {
+				controls.MouseButton( event.button , true );
+			});
+			document.addEventListener( 'mouseup' , function(event) {
+				controls.MouseButton( event.button , false );
+			});
+			
+			
+			let rStripes = render.GetStripes();
+			function RenderRays() {
+				//draw.DrawSky();   //Рисует небо
+				let angle = -fovHalf; //Стартовый угол
+				let stripe = rStripes[ 0 ];
+				water.Update();
+				let cameraPosition = camera.GetPosition();
+				let cameraAngle    = camera.GetAngle();
+				while( stripe.next ) {
+					stripe.Empty();
+					stripe.rayAngle = cameraAngle + angle;
+					stripe.cast     = caster.Cast( cameraPosition.Copy() , stripe.rayAngle );
+					render.RenderWall( stripe , angle );
+					//units           = units.concat( stripe.cast[ 0 ].units );
+					stripe          = stripe.next;
+					angle          += fovStep;
+				}
+				render.RenderObjects( level.units );
+				render.RenderObjects( level.effects );
+				render.RenderObjects( level.projectiles );
+				render.RenderObjects( level.objects );
+				render.Draw();
+				draw.InitBuffer();
+				for( let w = 0; w < width; w += 1 ) {
+					stripe = rStripes[ w ];
+					if( !stripe.cast.length ) break;
+					render.RenderFloor( stripe , water.texture , water.GetPosition() , water.GetNoize() );
+				}
+				draw.Draw();
+			}
+
+			//Основной цикл
+			function Frame() {
+				
+				let time = new Date().getTime();
+				fps.Update();
+				
+				if( fps.frameTime >= fps.fpsTargetDelta ) {
+					context.clearRect(0, 0, canvas.width, canvas.height);
+					if( level.winTrigger ) {
+						gMenu         = gMenus.win;
+						gMenu.message = `Победа! Счёт: ${level.score}`;
+						player.pause  = true;
+					}
+					if( !player.pause ) {
+						player.Update( time );
+						gameDirector.Update();
+						level.UpdateUnits( time );
+						level.UpdateEffects( time );
+						level.UpdateProjectiles( time );
+						level.UpdateDoors( time );
+						level.UpdateObjects( time );
+						level.UpdateDecals( time );
+						level.UpdateExit( time );
+						//gamepadControl.Update();
+						controls.Update( time );
+						render.Update();
+						RenderRays();
+					}
+					fps.frameTime -= fps.fpsTargetDelta;
+					player.Draw();
+					hud.Draw();
+					if( player.pause ) {
+						if( player.death ) {
+							gMenu = gMenus.death;
+						}
+						gMenu.Draw();
+					} 
+					window.requestAnimationFrame( Frame );
+				}
+			}
+			window.addEventListener( "gamepadconnected" , (e) => {
+				console.log( "connected" );
+				gamepadControl.Connected( e.gamepad.index );
+			});
+			let loaderImgs , loaderSounds;
+			const loadText = "КЛИКНИ НА ЭКРАН";
+			window.addEventListener( "load" , function() {
+				loaderImgs = setInterval( function() { //Загрузка изображений
+					context.fillStyle = `rgba( 0 , 255 , 0 , 1 )`;
+					context.fillRect( 0 , height - 50 , ( imagesLoaded / imagesToLoad ) * width , 50 );
+					context.font      = 'bold 15px Roboto';
+					context.fillStyle = 'black';
+					let tinfo = context.measureText( loadText );
+					let xPos  = parseInt( widthH - tinfo.width * 0.5 );
+					context.fillText( loadText , xPos , height - 33 );
+					if( imagesToLoad == imagesLoaded && sound ) {
+						clearInterval( loaderImgs );
+						loaderSounds = setInterval( function() { //Загрузка звуков
+							context.fillStyle = `rgba( 0 , 255 , 255 , 1 )`;
+							context.fillRect( 0 , height - 50 , ( soundsLoaded / soundsToLoad ) * width , 50 );
+							if( soundsToLoad == soundsLoaded ) {
+								window.requestAnimationFrame( Frame );
+								clearInterval( loaderSounds );
+							}
+						} , 100 );
+					}
+				} , 100 );
+			});
+			window.addEventListener( 'wheel' , function( event ) {
+				const delta = Math.sign( event.deltaY );
+				if ( delta == -1 ) {
+					controls.NextWeapon();
+				} else if ( delta == 1 ) {
+					controls.PrevWeapon();
+				}
+				// Отключаем стандартное поведение, если нужно
+				event.preventDefault();
+			}, { passive: false });
+			canvas.addEventListener( "click" , async () => {
+					await canvas.requestFullscreen();
+					await canvas.requestPointerLock( {
+						unadjustedMovement: true,
+					});
+					if( !sound ) sound = new Sound();
+			});
+		</script>
+	</body>
+</html>
